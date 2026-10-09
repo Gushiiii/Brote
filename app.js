@@ -2,7 +2,7 @@
 /* Brote · seguimiento de hábitos.
    Todo vive en el teléfono: IndexedDB como almacenamiento principal y localStorage como copia. */
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -32,6 +32,7 @@ function dayName(k) {
   const t = todayK();
   if (k === t) return 'Hoy';
   if (k === addK(t, -1)) return 'Ayer';
+  if (k === addK(t, 1)) return 'Mañana';
   return cap(DOW_LONG[dowK(k)]);
 }
 function daysText(days) {
@@ -78,6 +79,7 @@ const ICONS = {
   copy: 'M8 8h12v12H8zM4 16V4h12',
   star: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z',
   moon: 'M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z',
+  umbrella: 'M12 3a9 9 0 0 1 9 9H3a9 9 0 0 1 9-9zM12 12v6.5a2 2 0 0 0 4 0',
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[n]}"/></svg>`;
 
@@ -93,7 +95,8 @@ const MODES_SHORT = { max: 'antes de las', min: 'después de las', near: 'cerca 
 const TOLS = [0, 5, 10, 15, 20, 30, 45, 60];
 const COLORS = ['#22a55b', '#2f7cf6', '#f08c2e', '#e5484d', '#8b5cf6', '#14b3a3', '#d9a514', '#ec5fa3'];
 const EMOJIS = ['💧', '💪', '📖', '🛌', '🧘', '🏃', '🚶', '🍎', '🥗', '🦷', '💊', '✍️', '📝', '🎸', '🎨', '🧠', '📚', '🌱', '☀️', '🌙', '⏰', '😴', '📵', '🚭', '🍷', '☕', '🍫', '🥤', '🧹', '💰', '🙏', '❤️', '🐶', '🌳', '🎯', '🏋️', '🚴', '🏊', '🧴', '✅'];
-const LOG_KINDS = { habito: 'Hábitos', registro: 'Registros', logro: 'Logros', datos: 'Datos', ajustes: 'Ajustes' };
+const LOG_KINDS = { habito: 'Hábitos', registro: 'Registros', excepcion: 'Excepciones', logro: 'Logros', datos: 'Datos', ajustes: 'Ajustes' };
+const EXC_REASONS = ['Enfermedad', 'Viaje', 'Evento o celebración', 'Trabajo extra', 'Emergencia', 'Descanso planificado', 'Otro'];
 const DAY_MS = [3, 7, 14, 21, 30, 50, 75, 100, 150, 200, 365];
 const WEEK_MS = [2, 4, 8, 12, 26, 52];
 const PHRASES = [
@@ -132,7 +135,7 @@ function freshState() {
   return {
     v: 1, savedAt: 0, created: Date.now(),
     settings: { theme: 'auto', motivate: true, celebrate: true, lastBackup: 0, installHidden: false, welcomeHidden: false },
-    habits: seedHabits(), entries: {}, milestones: {}, log: [],
+    habits: seedHabits(), entries: {}, milestones: {}, exceptions: {}, log: [],
   };
 }
 function normalize(st) {
@@ -143,7 +146,7 @@ function normalize(st) {
   out.settings = { ...base.settings, ...(st.settings || {}) };
   if (!Array.isArray(out.habits)) out.habits = base.habits;
   if (!Array.isArray(out.log)) out.log = [];
-  for (const k of ['entries', 'milestones']) if (!out[k] || typeof out[k] !== 'object' || Array.isArray(out[k])) out[k] = {};
+  for (const k of ['entries', 'milestones', 'exceptions']) if (!out[k] || typeof out[k] !== 'object' || Array.isArray(out[k])) out[k] = {};
   out.habits = out.habits.map(h => newHabit({ ...h }));
   return out;
 }
@@ -247,10 +250,19 @@ function scoreRaw(h, k) {
   if (h.type === 'count') return Math.min(1, (v || 0) / h.goal);
   return v ? timeEval(h, v).score : 0;
 }
-const score = (h, k) => (counted(h, k) ? scoreRaw(h, k) : null);
+const isExc = k => !!S.exceptions[k];
+const score = (h, k) => (counted(h, k) && !isExc(k) ? scoreRaw(h, k) : null);
+// Meta semanal ajustada: los días de excepción descuentan en proporción. 0 = semana entera perdonada.
+function wTarget(h, ws) {
+  let e = 0;
+  for (let i = 0; i < 7; i++) if (isExc(addK(ws, i))) e++;
+  if (e >= 7) return 0;
+  return e ? Math.max(1, Math.ceil((h.weekly * (7 - e)) / 7)) : h.weekly;
+}
+const weekMet = (h, ws) => { const tg = wTarget(h, ws); return tg > 0 && countWeek(h, ws) >= tg; };
 function dayScore(k, only) {
   const t = todayK();
-  if (k > t) return null;
+  if (k > t || isExc(k)) return null;
   if (k === t && !S.entries[t]) return null;
   const list = only ? [only] : S.habits;
   const sc = list.map(h => score(h, k)).filter(x => x != null);
@@ -265,9 +277,13 @@ function streak(h) {
   const t = todayK();
   if (h.type === 'weekly') {
     let w = weekK(t);
-    if (countWeek(h, w) < h.weekly) w = addK(w, -7);
+    if (!weekMet(h, w)) w = addK(w, -7);
     let n = 0;
-    while (w >= weekK(h.start) && countWeek(h, w) >= h.weekly) { n++; w = addK(w, -7); }
+    while (w >= weekK(h.start)) {
+      if (!wTarget(h, w)) { w = addK(w, -7); continue; }
+      if (!weekMet(h, w)) break;
+      n++; w = addK(w, -7);
+    }
     return n;
   }
   let k = t, n = 0;
@@ -284,7 +300,8 @@ function bestStreak(h) {
   let best = 0, cur = 0;
   if (h.type === 'weekly') {
     for (let w = weekK(h.start); w <= weekK(t); w = addK(w, 7)) {
-      if (countWeek(h, w) >= h.weekly) best = Math.max(best, ++cur); else if (w < weekK(t)) cur = 0;
+      if (!wTarget(h, w)) continue;
+      if (weekMet(h, w)) best = Math.max(best, ++cur); else if (w < weekK(t)) cur = 0;
     }
     return best;
   }
@@ -303,7 +320,8 @@ function compliance(h, days = 30) {
   if (h.type === 'weekly') {
     for (let w = weekK(from); w <= weekK(t); w = addK(w, 7)) {
       const c = countWeek(h, w);
-      if (w < weekK(t) || c >= h.weekly) vals.push(Math.min(1, c / h.weekly));
+      const tg = wTarget(h, w);
+      if (tg && (w < weekK(t) || c >= tg)) vals.push(Math.min(1, c / tg));
     }
   } else {
     for (let k = from; k <= t; k = addK(k, 1)) {
@@ -333,11 +351,12 @@ function motivation() {
   const t = todayK(), y = addK(t, -1);
   const hs = activeHabits();
   if (!hs.length) return null;
+  if (isExc(t)) return { tone: 'exc', title: 'Hoy es un día de excepción', text: 'Tranquilo, no cuenta en tus números ni corta tus rachas. Si alcanzas a hacer algo, anótalo igual.' };
   const daily = hs.filter(h => isSched(h, t));
   const done = daily.filter(h => (scoreRaw(h, t) ?? 0) >= 1);
   const now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes();
   if (daily.length && done.length === daily.length) {
-    const weeklyLeft = hs.filter(h => h.type === 'weekly' && countWeek(h, weekK(t)) < h.weekly);
+    const weeklyLeft = hs.filter(h => h.type === 'weekly' && countWeek(h, weekK(t)) < wTarget(h, weekK(t)));
     return { tone: 'good', title: '¡Día completo!', text: weeklyLeft.length ? `Cumpliste todo lo de hoy. Si te animas, suma uno a «${weeklyLeft[0].name}».` : 'Cumpliste todo lo de hoy. Así se construye una racha.' };
   }
   for (const h of daily) {
@@ -350,7 +369,7 @@ function motivation() {
   const atRisk = daily.filter(h => (scoreRaw(h, t) ?? 0) < 1).map(h => ({ h, s: streak(h) })).filter(x => x.s >= 2).sort((a, b) => b.s - a.s)[0];
   if (atRisk) return { tone: 'streak', title: `${atRisk.s} días seguidos con «${atRisk.h.name}»`, text: 'No cortes la racha hoy. Vas muy bien.' };
   const daysLeft = 7 - dowK(t);
-  const behind = hs.filter(h => h.type === 'weekly').map(h => ({ h, left: h.weekly - countWeek(h, weekK(t)) })).find(x => x.left > 0 && x.left >= daysLeft - 1);
+  const behind = hs.filter(h => h.type === 'weekly').map(h => ({ h, left: wTarget(h, weekK(t)) - countWeek(h, weekK(t)) })).find(x => x.left > 0 && x.left >= daysLeft - 1);
   if (behind) return { tone: 'warn', title: `Te ${behind.left === 1 ? 'falta' : 'faltan'} ${behind.left} de «${behind.h.name}»`, text: `Quedan ${plural(daysLeft, 'día', 'días')} esta semana. ¡Todavía llegas!` };
   if (!done.length && daily.length) {
     const easiest = daily.map(h => ({ h, c: compliance(h, 30) ?? 0 })).sort((a, b) => b.c - a.c)[0].h;
@@ -452,16 +471,16 @@ function afterChange(h, k, before) {
   const s = scoreRaw(h, k);
   if (h.type === 'weekly') {
     const c = countWeek(h, weekK(k));
-    if (getV(h, k) && c === h.weekly) {
+    if (getV(h, k) && c === wTarget(h, weekK(k))) {
       const key = `${h.id}:semana:${weekK(k)}`;
-      if (!S.milestones[key]) { S.milestones[key] = Date.now(); confetti([h.color, '#ffd166']); toast(`¡Meta semanal cumplida! «${h.name}»: ${c} de ${h.weekly}`, 'star'); logEv('logro', `Meta semanal cumplida: ${h.name}`); }
+      if (!S.milestones[key]) { S.milestones[key] = Date.now(); confetti([h.color, '#ffd166']); toast(`¡Meta semanal cumplida! «${h.name}»: ${c} de ${wTarget(h, weekK(k))}`, 'star'); logEv('logro', `Meta semanal cumplida: ${h.name}`); }
     }
     milestone(h, streak(h), WEEK_MS, 'semanas');
   } else if ((s ?? 0) >= 0.75 && !((before ?? 0) >= 0.75)) {
     milestone(h, streak(h), DAY_MS, 'días');
   }
   const daily = activeHabits().filter(x => isSched(x, k));
-  if (daily.length && daily.every(x => (scoreRaw(x, k) ?? 0) >= 1)) {
+  if (!isExc(k) && daily.length && daily.every(x => (scoreRaw(x, k) ?? 0) >= 1)) {
     const key = 'dia:' + k;
     if (!S.milestones[key]) {
       S.milestones[key] = Date.now();
@@ -487,6 +506,7 @@ function dayBars(keys, getS, { h = 120, label = '' } = {}) {
   const grid = [0, 0.5, 1].map(v => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" class="c-grid"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end" class="c-lab">${v * 100}%</text>`).join('');
   const bars = keys.map((k, i) => {
     const s = getS(k), x = L + i * bw + bw * 0.16, w = bw * 0.68;
+    if (isExc(k)) return `<rect x="${x.toFixed(1)}" y="${T}" width="${w.toFixed(1)}" height="${H - T - B}" rx="2.5" class="c-exc"><title>${esc(fmtShort(k))}: excepción</title></rect>${i === 0 || i === keys.length - 1 || dowK(k) === 0 ? `<text x="${x + w / 2}" y="${H - 5}" text-anchor="middle" class="c-lab">${pk(k).getDate()}</text>` : ''}`;
     const lab = i === 0 || i === keys.length - 1 || dowK(k) === 0 ? `<text x="${x + w / 2}" y="${H - 5}" text-anchor="middle" class="c-lab">${pk(k).getDate()}</text>` : '';
     if (s == null) return `<rect x="${x.toFixed(1)}" y="${(H - B - 2).toFixed(1)}" width="${w.toFixed(1)}" height="2" rx="1" class="c-none"/>${lab}`;
     const hh = Math.max(3, (H - T - B) * s);
@@ -509,9 +529,9 @@ function heatmap(h, weeks) {
     for (let d = 0; d < 7; d++) {
       const k = addK(ws, d);
       if (k > t) continue;
-      const s = h ? score(h, k) : dayScore(k);
-      const fill = s == null ? '' : ` fill="${heat(s)}"`;
-      cells += `<rect x="${L + w * (cs + gap)}" y="${T + d * (cs + gap)}" width="${cs}" height="${cs}" rx="4" class="${s == null ? 'c-empty' : ''}"${fill}><title>${esc(fmtShort(k))}${s == null ? '' : ': ' + pct(s)}</title></rect>`;
+      const s = h ? score(h, k) : dayScore(k), ex = isExc(k);
+      const fill = ex || s == null ? '' : ` fill="${heat(s)}"`;
+      cells += `<rect x="${L + w * (cs + gap)}" y="${T + d * (cs + gap)}" width="${cs}" height="${cs}" rx="4" class="${ex ? 'c-exc' : s == null ? 'c-empty' : ''}"${fill}><title>${esc(fmtShort(k))}${ex ? ': excepción' : s == null ? '' : ': ' + pct(s)}</title></rect>`;
     }
   }
   const dl = [0, 2, 4].map(d => `<text x="0" y="${T + d * (cs + gap) + 12}" class="c-lab">${DOW[d]}</text>`).join('');
@@ -587,9 +607,10 @@ function vToday() {
   const t = todayK(), k = ui.day, isToday = k === t;
   const ws = ui.weekOf;
   const strip = [...Array(7)].map((_, i) => {
-    const d = addK(ws, i), fut = d > t, s = fut ? null : dayScore(d);
-    return `<button class="sd${d === k ? ' sel' : ''}${d === t ? ' today' : ''}" data-act="day" data-k="${d}" ${fut ? 'disabled' : ''} aria-label="${esc(fmtLong(d))}${s != null ? ', ' + pct(s) : ''}">
-      <span>${DOW[i]}</span><i${s != null ? ` class="has" style="background:${heat(s)};color:${heatInk(s)}"` : ''}>${pk(d).getDate()}</i></button>`;
+    const d = addK(ws, i), fut = d > t, ex = isExc(d), s = fut ? null : dayScore(d);
+    const look = ex ? ' class="exc"' : s != null ? ` class="has" style="background:${heat(s)};color:${heatInk(s)}"` : fut ? ' class="fut"' : '';
+    return `<button class="sd${d === k ? ' sel' : ''}${d === t ? ' today' : ''}" data-act="day" data-k="${d}" aria-label="${esc(fmtLong(d))}${ex ? ', día de excepción' : s != null ? ', ' + pct(s) : ''}">
+      <span>${DOW[i]}</span><i${look}>${pk(d).getDate()}</i></button>`;
   }).join('');
   const hs = activeHabits();
   const due = hs.filter(h => h.type === 'weekly' || isSched(h, k));
@@ -597,6 +618,7 @@ function vToday() {
   const daily = due.filter(h => h.type !== 'weekly');
   const done = daily.filter(h => (scoreRaw(h, k) ?? 0) >= 1).length;
   const avg = daily.length ? daily.reduce((a, h) => a + (scoreRaw(h, k) ?? 0), 0) / daily.length : null;
+  const fut = k > t, exc = S.exceptions[k];
   const mot = isToday && S.settings.motivate ? motivation() : null;
   const standalone = window.navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -612,12 +634,14 @@ function vToday() {
   <div class="week">
     <button class="icon-btn sm" data-act="week" data-d="-7" aria-label="Semana anterior">${ic('left')}</button>
     <div class="strip">${strip}</div>
-    <button class="icon-btn sm" data-act="week" data-d="7" ${ws >= weekK(t) ? 'disabled' : ''} aria-label="Semana siguiente">${ic('right')}</button>
+    <button class="icon-btn sm" data-act="week" data-d="7" ${ws >= addK(weekK(t), 56) ? 'disabled' : ''} aria-label="Semana siguiente">${ic('right')}</button>
   </div>
   ${showInstall ? `<div class="notice"><div class="notice-ic">${ic('share')}</div><div><b>Instala Brote en tu iPhone</b><p>Toca <b>Compartir</b> y luego <b>Agregar a pantalla de inicio</b>. Así funciona sin internet y tus datos quedan protegidos.</p></div><button class="icon-btn sm" data-act="hide-install" aria-label="Ocultar">${ic('x')}</button></div>` : ''}
   ${showWelcome ? `<div class="notice"><div class="notice-ic">${ic('sprout')}</div><div><b>Te dejamos 5 hábitos de ejemplo</b><p>Tócalos para ver detalles, editarlos o borrarlos. Crea los tuyos con <b>Nuevo hábito</b>.</p></div><button class="icon-btn sm" data-act="hide-welcome" aria-label="Ocultar">${ic('x')}</button></div>` : ''}
   ${showBackup ? `<button class="notice notice-btn" data-act="open-exp"><div class="notice-ic">${ic('download')}</div><div><b>Haz un respaldo</b><p>${S.settings.lastBackup ? 'Tu último respaldo fue hace más de 2 semanas' : 'Aún no guardas una copia de tus datos'}. Toma 10 segundos.</p></div>${ic('right')}</button>` : ''}
-  ${daily.length ? `<section class="card day-card">
+  ${vException(k)}
+  ${fut ? `<div class="empty"><p><b>Este día aún no llega</b></p><p class="muted">Si ya sabes que será un día fuera de tu rutina, márcalo arriba como excepción por adelantado.</p></div>` : ''}
+  ${daily.length && !fut && !exc ? `<section class="card day-card">
     ${ring(avg, 76, `${done} de ${daily.length}`)}
     <div class="day-txt">
       <p class="label">${isToday ? 'Tu día' : 'Ese día'}</p>
@@ -625,9 +649,9 @@ function vToday() {
       ${mot ? `<p class="mot mot-${mot.tone}"><b>${esc(mot.title)}${/[.!?»]$/.test(mot.title) ? '' : '.'}</b> ${esc(mot.text)}</p>` : `<p class="muted small">${avg >= 1 ? 'Todo cumplido.' : 'Puedes anotar o corregir lo que hiciste ese día.'}</p>`}
     </div>
   </section>` : ''}
-  ${mot && S.settings.motivate ? `<p class="phrase">${ic('sprout', 'ic-sm')}${esc(phraseOfDay())}</p>` : ''}
-  <div class="habits">${due.sort((a, b) => order(a) - order(b)).map(h => vHabitCard(h, k)).join('') || (hs.length ? '' : `<div class="empty"><p><b>Aún no tienes hábitos</b></p><p class="muted">Crea el primero. Empieza con algo tan fácil que no puedas decir que no.</p></div>`)}</div>
-  ${off.length ? `<button class="off-toggle" data-act="toggle-off" aria-expanded="${ui.showOff}">${ic(ui.showOff ? 'down' : 'right', 'ic-sm')} No toca ${isToday ? 'hoy' : 'ese día'} · ${off.length}</button>
+  ${mot && S.settings.motivate && !exc ? `<p class="phrase">${ic('sprout', 'ic-sm')}${esc(phraseOfDay())}</p>` : ''}
+  ${fut ? '' : `<div class="habits${exc ? ' in-exc' : ''}">${due.sort((a, b) => order(a) - order(b)).map(h => vHabitCard(h, k)).join('') || (hs.length ? '' : `<div class="empty"><p><b>Aún no tienes hábitos</b></p><p class="muted">Crea el primero. Empieza con algo tan fácil que no puedas decir que no.</p></div>`)}</div>`}
+  ${!fut && off.length ? `<button class="off-toggle" data-act="toggle-off" aria-expanded="${ui.showOff}">${ic(ui.showOff ? 'down' : 'right', 'ic-sm')} No toca ${isToday ? 'hoy' : 'ese día'} · ${off.length}</button>
     ${ui.showOff ? `<div class="habits off">${off.map(h => `<button class="hc hc-off" data-act="habit" data-id="${h.id}">${bubble(h)}<span class="hc-txt"><b>${esc(h.name)}</b><small>${esc(daysText(h.days))}</small></span></button>`).join('')}</div>` : ''}` : ''}
   <button class="btn btn-block btn-outline" data-act="new">${ic('plus')} Nuevo hábito</button>`;
 }
@@ -638,8 +662,9 @@ function vHabitCard(h, k) {
   if (h.type === 'check') { sub = v ? 'Hecho' : 'Pendiente'; ctrl = tick; }
   else if (h.type === 'weekly') {
     const c = countWeek(h, weekK(k));
-    sub = c >= h.weekly ? `¡Meta cumplida! ${c} de ${h.weekly} esta semana` : `${c} de ${h.weekly} esta semana`;
-    extra = `<span class="dots">${[...Array(Math.max(h.weekly, c))].map((_, i) => `<i class="${i < c ? 'on' : ''}"></i>`).join('')}</span>`;
+    const tg = wTarget(h, weekK(k));
+    sub = !tg ? 'Semana de excepción' : c >= tg ? `¡Meta cumplida! ${c} de ${tg} esta semana` : `${c} de ${tg} esta semana${tg < h.weekly ? ' (ajustada)' : ''}`;
+    extra = `<span class="dots">${[...Array(Math.max(tg, c))].map((_, i) => `<i class="${i < c ? 'on' : ''}"></i>`).join('')}</span>`;
     ctrl = tick;
   } else if (h.type === 'count') {
     sub = `${v || 0} de ${h.goal}${h.unit ? ' ' + esc(h.unit) : ''}`;
@@ -660,22 +685,89 @@ function vHabitCard(h, k) {
   </article>`;
 }
 
+function vException(k) {
+  const e = S.exceptions[k], t = todayK();
+  const when = k === t ? 'Hoy' : k > t ? 'Este día' : 'Ese día';
+  if (!e) return `<button class="exc-ask" data-act="exc-on">
+      <span class="exc-ic">${ic('umbrella')}</span>
+      <span class="exc-txt"><b>${when === 'Hoy' ? '¿Hoy es un día fuera de la rutina?' : '¿Día fuera de la rutina?'}</b><small>Márcalo como excepción: no contará como malo ni cortará tus rachas.</small></span>
+      <span class="switch" aria-hidden="true"><i></i></span></button>`;
+  return `<section class="exc-card">
+      <div class="exc-top"><span class="exc-ic">${ic('umbrella')}</span><div class="exc-txt"><b>${when} es un día de excepción</b><small>No cuenta en tus porcentajes ni corta rachas.</small></div>
+      <button class="switch" role="switch" aria-checked="true" aria-label="Quitar excepción" data-act="exc-off"><i></i></button></div>
+      <button class="exc-reason" data-act="exc-edit"><span class="pill-exc">${esc(e.reason)}</span>${e.note ? `<span>${esc(e.note)}</span>` : '<span class="muted">Agregar detalle</span>'}${ic('pencil', 'ic-sm')}</button>
+    </section>`;
+}
+function openException(k) {
+  const cur = S.exceptions[k];
+  let reason = cur ? cur.reason : '';
+  const w = openSheet(`
+    <div class="sheet-top"><div><p class="eyebrow">${esc(fmtLong(k))}</p><h3 class="sheet-title">¿Por qué es un día de excepción?</h3></div><button class="icon-btn" data-act="close-layer" aria-label="Cerrar">${ic('x')}</button></div>
+    <p class="muted small">Queda guardado para que más adelante puedas revisar qué te saca de la rutina.</p>
+    <div class="chips exc-chips">${EXC_REASONS.map(r => `<button class="chip${reason === r ? ' on' : ''}" data-act="exc-r" data-v="${esc(r)}">${esc(r)}</button>`).join('')}</div>
+    <label class="flabel" for="exc-note">Detalle (opcional)</label>
+    <textarea id="exc-note" class="field" rows="2" maxlength="160" placeholder="Ej: matrimonio de mi prima, gripe, viaje a Santiago…">${esc(cur ? cur.note : '')}</textarea>
+    <button class="btn btn-exc btn-block" data-act="exc-save">${ic('umbrella')} ${cur ? 'Guardar cambios' : 'Marcar como excepción'}</button>
+    ${cur ? '<button class="btn btn-ghost-bad btn-block" data-act="exc-del">Quitar excepción</button>' : ''}`, {
+    acts: {
+      'exc-r': el => { reason = el.dataset.v; $$('[data-act="exc-r"]', w).forEach(c => c.classList.toggle('on', c.dataset.v === reason)); },
+      'exc-save': (el, e, l) => {
+        const note = $('#exc-note', w).value.trim();
+        if (!reason && !note) { toast('Elige un motivo o escríbelo'); return; }
+        S.exceptions[k] = { reason: reason || 'Otro', note, t: Date.now() };
+        logEv('excepcion', `${cur ? 'Excepción editada' : 'Día de excepción'} (${fmtShort(k)}): ${reason || 'Otro'}${note ? ' — ' + note : ''}`);
+        persist(); closeLayer(l); render(true);
+        if (!cur) toast('Día perdonado. No contará en tus números.', 'good');
+      },
+      'exc-del': (el, e, l) => { closeLayer(l); removeException(k); },
+    },
+  });
+}
+function removeException(k) {
+  const e = S.exceptions[k];
+  if (!e) return;
+  delete S.exceptions[k];
+  logEv('excepcion', `Excepción quitada (${fmtShort(k)}): ${e.reason}`);
+  persist(); render(true); toast('El día vuelve a contar normalmente');
+}
+function vExceptions() {
+  const all = Object.entries(S.exceptions).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  if (!all.length) return '';
+  const t = todayK(), from = addK(t, -29);
+  const last30 = all.filter(([k]) => k >= from && k <= t).length;
+  const byReason = {};
+  for (const [, e] of all) byReason[e.reason] = (byReason[e.reason] || 0) + 1;
+  const reasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
+  return `<section class="card panel">
+    <div class="panel-head"><h2>Días de excepción</h2><span class="muted small">${plural(last30, 'día', 'días')} en los últimos 30</span></div>
+    <div class="exc-bars">${reasons.map(([r, n]) => `<div class="mbar"><span class="mbar-l">${esc(r)}</span><span class="mbar-t"><i style="width:${(n / reasons[0][1]) * 100}%"></i></span><b>${n}</b></div>`).join('')}</div>
+    <ul class="exc-list">${all.slice(0, 12).map(([k, e]) => `<li><button data-act="exc-open" data-k="${k}"><span class="exc-date">${esc(fmtShort(k))}<small>${esc(DOW_LONG[dowK(k)])}</small></span><span class="exc-what"><b>${esc(e.reason)}</b>${e.note ? `<small>${esc(e.note)}</small>` : ''}</span>${ic('right', 'ic-sm')}</button></li>`).join('')}</ul>
+    ${all.length > 12 ? `<p class="muted small">Y ${plural(all.length - 12, 'día más', 'días más')}. Todos quedan en el registro de actividad.</p>` : ''}
+  </section>`;
+}
+
 /* ---------- Vista: Calendario ---------- */
 function vCalendar() {
   const t = todayK();
   if (!ui.cal) ui.cal = t.slice(0, 8) + '01';
   const m0 = pk(ui.cal), y = m0.getFullYear(), mo = m0.getMonth();
-  const isCur = ui.cal === t.slice(0, 8) + '01';
+  const maxM = (() => { const d = pk(t); d.setDate(1); d.setMonth(d.getMonth() + 3); return dk(d); })();
+  const isCur = ui.cal >= maxM;
   const only = ui.calHabit === 'all' ? null : habitById(ui.calHabit);
   if (!only) ui.calHabit = 'all';
   const dim = new Date(y, mo + 1, 0).getDate(), blanks = dowK(ui.cal);
-  let cells = '<span></span>'.repeat(blanks), sum = 0, n = 0, perfect = 0;
+  let cells = '<span></span>'.repeat(blanks), sum = 0, n = 0, perfect = 0, nExc = 0;
   for (let d = 1; d <= dim; d++) {
     const k = dk(new Date(y, mo, d)), fut = k > t;
     const s = fut ? null : only ? score(only, k) : dayScore(k);
     if (s != null) { sum += s; n++; if (s >= 0.999) perfect++; }
+    if (isExc(k)) {
+      nExc++;
+      cells += `<button class="cd exc${k === t ? ' today' : ''}" data-act="cal-day" data-k="${k}" aria-label="${esc(fmtLong(k))}, día de excepción: ${esc(S.exceptions[k].reason)}">${d}</button>`;
+      continue;
+    }
     cells += fut
-      ? `<span class="cd fut">${d}</span>`
+      ? `<button class="cd fut" data-act="cal-day" data-k="${k}" aria-label="${esc(fmtLong(k))}">${d}</button>`
       : `<button class="cd${k === t ? ' today' : ''}${s != null ? ' has' : ''}" ${s != null ? `style="background:${heat(s)};color:${heatInk(s)}"` : ''} data-act="cal-day" data-k="${k}" aria-label="${esc(fmtLong(k))}${s != null ? ', ' + pct(s) : ''}">${d}</button>`;
   }
   const hs = S.habits.filter(h => !h.archivedAt);
@@ -689,14 +781,32 @@ function vCalendar() {
     <div class="cal-head"><button class="icon-btn" data-act="cal" data-d="-1" aria-label="Mes anterior">${ic('left')}</button><h2>${esc(cap(m0.toLocaleDateString('es', { month: 'long', year: 'numeric' })))}</h2><button class="icon-btn" data-act="cal" data-d="1" ${isCur ? 'disabled' : ''} aria-label="Mes siguiente">${ic('right')}</button></div>
     <div class="cal-grid">${DOW.map(d => `<span class="cal-dow">${d}</span>`).join('')}${cells}</div>
     <div class="legend"><span>Fallé la mayoría</span><i></i><span>Cumplí todo</span></div>
+    <div class="legend-exc"><span class="sw-exc"></span>Día de excepción: no cuenta como malo</div>
   </section>
   <div class="tiles">
     <div class="tile"><small>Cumplimiento del mes</small><b>${n ? pct(sum / n) : '—'}</b><em>${only ? esc(only.name) : 'todos los hábitos'}</em></div>
     <div class="tile"><small>Días perfectos</small><b>${perfect}</b><em>de ${plural(n, 'día registrado', 'días registrados')}</em></div>
   </div>
-  <p class="muted small center">Toca un día para ver el detalle o corregirlo.</p>`;
+  ${nExc ? `<p class="muted small center">Este mes: ${plural(nExc, 'día de excepción', 'días de excepción')}.</p>` : ''}
+  <p class="muted small center">Toca un día para ver el detalle, corregirlo o marcarlo como excepción.</p>`;
 }
 function openDay(k) {
+  const t = todayK(), ex = S.exceptions[k];
+  if (k > t || ex) {
+    openSheet(`
+      <div class="sheet-top"><div><p class="eyebrow">${esc(fmtLong(k))}</p><h3 class="sheet-title">${ex ? 'Día de excepción' : 'Día futuro'}</h3></div><button class="icon-btn" data-act="close-layer" aria-label="Cerrar">${ic('x')}</button></div>
+      ${ex ? `<div class="exc-card"><button class="exc-reason" data-act="exc-edit2"><span class="pill-exc">${esc(ex.reason)}</span>${ex.note ? `<span>${esc(ex.note)}</span>` : '<span class="muted">Sin detalle</span>'}${ic('pencil', 'ic-sm')}</button></div><p class="muted small">Este día no cuenta en tus porcentajes ni corta rachas.</p>` : '<p class="muted">Si sabes que será un día fuera de la rutina, puedes perdonarlo por adelantado.</p>'}
+      <button class="btn ${ex ? 'btn-soft' : 'btn-exc'} btn-block" data-act="exc-edit2">${ic('umbrella')} ${ex ? 'Cambiar motivo' : 'Marcar como excepción'}</button>
+      ${ex ? '<button class="btn btn-ghost-bad btn-block" data-act="exc-del2">Quitar excepción</button>' : ''}
+      ${k <= t ? '<button class="btn btn-primary btn-block" data-act="edit-day">Ver o anotar este día</button>' : ''}`, {
+      acts: {
+        'exc-edit2': (el, e, l) => { closeLayer(l); openException(k); },
+        'exc-del2': (el, e, l) => { closeLayer(l); removeException(k); },
+        'edit-day': (el, e, l) => { closeLayer(l); ui.day = k; ui.weekOf = weekK(k); go('today'); },
+      },
+    });
+    return;
+  }
   const hs = S.habits.filter(h => !h.archivedAt && (h.type === 'weekly' ? getV(h, k) : isSched(h, k)));
   const s = dayScore(k);
   const rows = hs.map(h => {
@@ -710,8 +820,9 @@ function openDay(k) {
   openSheet(`
     <div class="sheet-top"><div><p class="eyebrow">${esc(fmtLong(k))}</p><h3 class="sheet-title">${s == null ? 'Sin registros' : `Cumpliste el ${pct(s)}`}</h3></div><button class="icon-btn" data-act="close-layer" aria-label="Cerrar">${ic('x')}</button></div>
     ${rows ? `<ul class="day-list">${rows}</ul>` : '<p class="muted">Ese día no tocaba ningún hábito.</p>'}
-    <button class="btn btn-primary btn-block" data-act="edit-day">${ic('pencil')} Anotar o corregir este día</button>`, {
-    acts: { 'edit-day': (el, e, l) => { closeLayer(l); ui.day = k; ui.weekOf = weekK(k); go('today'); } },
+    <button class="btn btn-primary btn-block" data-act="edit-day">${ic('pencil')} Anotar o corregir este día</button>
+    <button class="btn btn-soft btn-block" data-act="exc-mark">${ic('umbrella')} Marcar como excepción</button>`, {
+    acts: { 'edit-day': (el, e, l) => { closeLayer(l); ui.day = k; ui.weekOf = weekK(k); go('today'); }, 'exc-mark': (el, e, l) => { closeLayer(l); openException(k); } },
   });
 }
 
@@ -733,9 +844,9 @@ function vStats() {
       const vs = []; for (let i = 0; i < 30; i++) { const k = addK(t, -i); if (isSched(h, k) && counted(h, k) && (getV(h, k) != null || k !== t)) vs.push(getV(h, k) || 0); }
       if (vs.length) extra = `<p class="hs-extra">${ic('counter', 'ic-sm')} Promedio ${(vs.reduce((a, b) => a + b, 0) / vs.length).toLocaleString('es', { maximumFractionDigits: 1 })} ${esc(h.unit || '')} al día</p>`;
     } else if (h.type === 'weekly') {
-      extra = `<p class="hs-extra">${ic('repeat', 'ic-sm')} Esta semana ${countWeek(h, weekK(t))} de ${h.weekly}</p>`;
+      extra = `<p class="hs-extra">${ic('repeat', 'ic-sm')} Esta semana ${countWeek(h, weekK(t))} de ${wTarget(h, weekK(t))}</p>`;
     }
-    const mini = [...Array(28)].map((_, i) => { const k = addK(t, i - 27), s = score(h, k); return `<i${s != null ? ` style="background:${heat(s)}"` : ''}></i>`; }).join('');
+    const mini = [...Array(28)].map((_, i) => { const k = addK(t, i - 27), s = score(h, k); return isExc(k) ? '<i class="exc"></i>' : `<i${s != null ? ` style="background:${heat(s)}"` : ''}></i>`; }).join('');
     return `<button class="card hs" data-act="habit" data-id="${h.id}">
       <div class="hs-top">${bubble(h)}<span class="hs-name"><b>${esc(h.name)}</b><small>${TYPES[h.type].n}${h.type === 'weekly' ? ` · ${h.weekly} por semana` : ''}</small></span>${ring(c30, 54)}</div>
       <div class="hs-mini" aria-hidden="true">${mini}</div>
@@ -753,6 +864,7 @@ function vStats() {
   </div>
   <section class="card panel"><div class="panel-head"><h2>Cada día</h2><span class="muted small">Últimos 30 días</span></div>${dayBars(keys, k => dayScore(k), { label: 'Cumplimiento diario de los últimos 30 días' })}</section>
   <section class="card panel"><div class="panel-head"><h2>Constancia</h2><span class="muted small">Cada cuadro es un día</span></div>${heatmap(null)}</section>
+  ${vExceptions()}
   <div class="sec-head"><h2>Por hábito</h2></div>
   <div class="hs-list">${cards || '<p class="muted">Crea un hábito para ver su progreso.</p>'}</div>`;
 }
@@ -1036,6 +1148,7 @@ function openHow() {
       <p><b>Hora objetivo.</b> Dentro de tu margen es 100%. Fuera del margen baja poco a poco y llega a 0% cuando te pasas por 2 horas. Si la meta es «no más tarde de», hacerlo antes siempre es 100%.</p>
       <p><b>Veces por semana.</b> Cada semana vale lo que cumpliste de tu meta: 2 de 3 es 67%. Los días que lo haces cuentan como cumplidos en el calendario.</p>
       <p><b>Colores del calendario.</b> Cada día es el promedio de los hábitos que tocaban: rojo si fallaste la mayoría, amarillo a mitad de camino y verde si cumpliste.</p>
+      <p><b>Días de excepción.</b> Un día marcado como excepción no cuenta en ningún porcentaje, no corta rachas y aparece con rayas violeta. En los hábitos semanales, la meta de esa semana baja en proporción.</p>
       <p><b>Rachas.</b> Días seguidos con al menos 75% en ese hábito. Los días que no toca no cortan la racha, y hoy no la corta mientras el día no termine.</p>
     </div>
     <div class="legend"><span>0%</span><i></i><span>100%</span></div>
@@ -1046,8 +1159,12 @@ function openHow() {
 const ACT = {
   tab: el => { if (el.dataset.t === 'today') { ui.day = todayK(); ui.weekOf = weekK(ui.day); } go(el.dataset.t); },
   day: el => { ui.day = el.dataset.k; render(true); },
-  week: el => { ui.weekOf = addK(ui.weekOf, Number(el.dataset.d)); const t = todayK(); ui.day = ui.weekOf === weekK(t) ? t : addK(ui.weekOf, 6); render(true); },
+  week: el => { ui.weekOf = addK(ui.weekOf, Number(el.dataset.d)); const t = todayK(); ui.day = ui.weekOf === weekK(t) ? t : ui.weekOf > t ? ui.weekOf : addK(ui.weekOf, 6); render(true); },
   'go-today': () => { ui.day = todayK(); ui.weekOf = weekK(ui.day); render(true); },
+  'exc-on': () => openException(ui.day),
+  'exc-edit': () => openException(ui.day),
+  'exc-off': () => removeException(ui.day),
+  'exc-open': el => openDay(el.dataset.k),
   'toggle-off': () => { ui.showOff = !ui.showOff; render(true); },
   'hide-install': () => { S.settings.installHidden = true; persist(); render(true); },
   'hide-welcome': () => { S.settings.welcomeHidden = true; persist(); render(true); },

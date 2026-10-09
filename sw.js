@@ -1,5 +1,5 @@
 /* Brote: funciona sin conexión. Sube CACHE cuando cambien los archivos. */
-const CACHE = 'brote-v1';
+const CACHE = 'brote-v2';
 const FONTS = 'brote-fonts';
 const ASSETS = ['./', './index.html', './app.css', './app.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
