@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="35%" r="80%"><stop offset="0" stop-color="#22302a"/><stop offset="1" stop-color="#0c120e"/></radialGradient>
+    <linearGradient id="lf" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7ef0a8"/><stop offset="1" stop-color="#1fa45a"/></linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <path d="M256 360V236" stroke="#3ccf7c" stroke-width="22" stroke-linecap="round" fill="none"/>
+  <path d="M256 250c0-62 46-108 124-108 0 78-46 108-124 108z" fill="url(#lf)"/>
+  <path d="M256 290c0-52-40-92-108-92 0 66 40 92 108 92z" fill="#2fbf71"/>
+  <g>
+    <circle cx="160" cy="410" r="13" fill="hsl(4,66%,52%)"/>
+    <circle cx="192" cy="410" r="13" fill="hsl(36,66%,52%)"/>
+    <circle cx="224" cy="410" r="13" fill="hsl(68,66%,50%)"/>
+    <circle cx="256" cy="410" r="13" fill="hsl(100,66%,48%)"/>
+    <circle cx="288" cy="410" r="13" fill="hsl(132,66%,48%)"/>
+    <circle cx="320" cy="410" r="13" fill="hsl(132,66%,48%)"/>
+    <circle cx="352" cy="410" r="13" fill="hsl(132,66%,48%)"/>
+  </g>
+</svg>
